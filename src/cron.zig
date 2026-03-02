@@ -1648,7 +1648,8 @@ pub fn cliListRuns(allocator: std.mem.Allocator, id: []const u8) !void {
 /// Format a Unix timestamp (seconds since epoch) into a human-readable string.
 /// Returns: "Mon Mar 02 2026 12:39:00 UTC"
 fn formatUnixTimestamp(secs: i64, buf: []u8) []const u8 {
-    if (buf.len < 30) return "buffer too small";
+    const min_formatted_len = "Thu Jan 01 1970 00:00:00 UTC".len;
+    if (buf.len < min_formatted_len) return "buffer too small";
     if (secs < 0) return "invalid timestamp";
 
     const epoch_secs = std.time.epoch.EpochSeconds{ .secs = @intCast(secs) };
@@ -1726,6 +1727,19 @@ test "formatUnixTimestamp formats unix epoch" {
 test "formatUnixTimestamp rejects negative timestamp" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("invalid timestamp", formatUnixTimestamp(-1, &buf));
+}
+
+test "formatUnixTimestamp accepts exact-size buffer" {
+    var buf: [28]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Thu Jan 01 1970 00:00:00 UTC",
+        formatUnixTimestamp(0, &buf),
+    );
+}
+
+test "formatUnixTimestamp rejects undersized buffer" {
+    var buf: [27]u8 = undefined;
+    try std.testing.expectEqualStrings("buffer too small", formatUnixTimestamp(0, &buf));
 }
 
 test "parseDuration seconds" {
