@@ -1,0 +1,200 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nullclaw
+  namespace: nullclaw
+  labels:
+    app.kubernetes.io/name: nullclaw
+    name: nullclaw
+  annotations:
+    keel.sh/policy: major
+    keel.sh/trigger: poll
+    keel.sh/pollSchedule: "@every 6h"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      name: nullclaw
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nullclaw
+        name: nullclaw
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ghcr-pull-secret
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+
+      volumes:
+        - name: nullclaw-data
+          persistentVolumeClaim:
+            claimName: nullclaw-data
+        - name: signal-cli-data
+          persistentVolumeClaim:
+            claimName: signal-cli-data
+        - name: config
+          configMap:
+            name: nullclaw-config
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+        - name: signal-tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 128Mi
+
+      containers:
+        # ── nullclaw gateway ──────────────────────────────────
+        - name: nullclaw
+          image: ghcr.io/jmylchreest/nullclaw:latest
+          imagePullPolicy: Always
+          args:
+            - gateway
+            - --port
+            - "3000"
+            - --host
+            - "0.0.0.0"
+          env:
+            - name: TZ
+              value: UTC
+            - name: HOME
+              value: /nullclaw-data
+            - name: NULLCLAW_WORKSPACE
+              value: /nullclaw-data/workspace
+            - name: NULLCLAW_HOME
+              value: /nullclaw-data/.nullclaw
+            - name: NULLCLAW_OPENROUTER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nullclaw-secrets
+                  key: NULLCLAW_OPENROUTER_API_KEY
+            - name: SIGNAL_ACCOUNT
+              valueFrom:
+                secretKeyRef:
+                  name: nullclaw-secrets
+                  key: SIGNAL_ACCOUNT
+            - name: NULLCLAW_WEB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nullclaw-secrets
+                  key: NULLCLAW_WEB_TOKEN
+
+          ports:
+            - name: gateway
+              containerPort: 3000
+              protocol: TCP
+            - name: web
+              containerPort: 32123
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3000
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 500m
+              memory: 64Mi
+          securityContext:
+            runAsUser: 65534
+            runAsGroup: 65534
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: nullclaw-data
+              mountPath: /nullclaw-data
+            - name: config
+              mountPath: /nullclaw-data/.nullclaw/config.json
+              subPath: config.json
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+
+        # ── signal-cli daemon sidecar ─────────────────────────
+        # Native GraalVM image running signal-cli in daemon mode.
+        # Exposes JSON-RPC at /api/v1/rpc, SSE at /api/v1/events,
+        # and health at /api/v1/check — exactly what nullclaw expects.
+        - name: signal-cli
+          image: registry.gitlab.com/packaging/signal-cli/signal-cli-native:latest
+          imagePullPolicy: Always
+          args:
+            - --config
+            - /signal-data
+            - daemon
+            - --http
+            - "0.0.0.0:8080"
+            - --receive-mode
+            - on-start
+          env:
+            - name: TZ
+              value: UTC
+          ports:
+            - name: signal-api
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/v1/check
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/check
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: signal-cli-data
+              mountPath: /signal-data
+            - name: signal-tmp
+              mountPath: /tmp

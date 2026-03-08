@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nullclaw-config
+  namespace: nullclaw
+data:
+  config.json: |
+    {
+      "default_temperature": 0.7,
+
+      "models": {
+        "providers": {
+          "openrouter": {
+            "api_key_env": "NULLCLAW_OPENROUTER_API_KEY"
+          }
+        }
+      },
+
+      "agents": {
+        "defaults": {
+          "model": {
+            "primary": "openrouter/anthropic/claude-sonnet-4"
+          }
+        }
+      },
+
+      "channels": {
+        "cli": true,
+
+        "signal": {
+          "accounts": {
+            "main": {
+              "http_url": "http://127.0.0.1:8080",
+              "account": "+447538320010",
+              "allow_from": ["+447538320010"],
+              "group_policy": "disabled",
+              "ignore_stories": true
+            }
+          }
+        },
+
+        "web": {
+          "transport": "local",
+          "listen": "0.0.0.0",
+          "port": 32123,
+          "message_auth_mode": "token",
+          "max_connections": 4
+        }
+      },
+
+      "memory": {
+        "backend": "sqlite",
+        "auto_save": true,
+        "search": {
+          "enabled": true,
+          "provider": "none"
+        },
+        "lifecycle": {
+          "hygiene_enabled": true,
+          "archive_after_days": 7,
+          "purge_after_days": 30
+        }
+      },
+
+      "autonomy": {
+        "level": "supervised",
+        "workspace_only": true,
+        "max_actions_per_hour": 20
+      },
+
+      "gateway": {
+        "port": 3000,
+        "host": "0.0.0.0",
+        "allow_public_bind": true,
+        "require_pairing": true
+      },
+
+      "security": {
+        "sandbox": {
+          "backend": "auto"
+        },
+        "audit": {
+          "enabled": true
+        }
+      },
+
+      "runtime": {
+        "adapter": "native"
+      }
+    }
