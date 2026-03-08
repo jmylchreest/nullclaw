@@ -957,14 +957,88 @@ pub const SignalChannel = struct {
         };
     }
 
+    /// Handle a syncMessage envelope for "Note to Self" support.
+    ///
+    /// Signal sync messages are sent to all linked devices when the primary
+    /// device sends a message. Most syncs are outbound echoes (messages sent
+    /// to other people) and should be ignored. However, when the destination
+    /// of the sentMessage is the account's own number, this is a "Note to Self"
+    /// message — the user is intentionally messaging themselves, and the bot
+    /// (running as a linked device) should process it as an inbound message.
+    fn parseSyncNoteToSelf(
+        self: *const SignalChannel,
+        allocator: std.mem.Allocator,
+        env_obj: std.json.ObjectMap,
+        sync: std.json.Value,
+    ) !?root.ChannelMessage {
+        if (sync != .object) return null;
+        const sent = sync.object.get("sentMessage") orelse return null;
+        if (sent != .object) return null;
+        const sent_obj = sent.object;
+
+        // Check destination: must be self-account for Note to Self.
+        const dest = jsonString(sent_obj.get("destinationNumber")) orelse
+            jsonString(sent_obj.get("destination"));
+        if (dest == null) return null;
+        if (!std.mem.eql(u8, normalizeAllowEntry(dest.?), normalizeAllowEntry(self.account))) return null;
+
+        // Extract message body from sentMessage.
+        const message = jsonString(sent_obj.get("message"));
+        if (message == null or message.?.len == 0) return null;
+
+        // Use the envelope source fields for sender identity.
+        const source = jsonString(env_obj.get("source"));
+        const source_number = jsonString(env_obj.get("sourceNumber"));
+        const source_name = jsonString(env_obj.get("sourceName"));
+        const envelope_timestamp = jsonU64(env_obj.get("timestamp"));
+        const dm_timestamp = jsonU64(sent_obj.get("timestamp"));
+
+        // Effective sender for reply target.
+        const sender_raw = source_number orelse source orelse return null;
+        if (sender_raw.len == 0) return null;
+
+        // Allowlist check: the sender must be in allow_from.
+        if (!(self.isSenderAllowed(sender_raw) or blk: {
+            if (source) |src| {
+                if (!std.mem.eql(u8, src, sender_raw)) break :blk self.isSenderAllowed(src);
+            }
+            break :blk false;
+        })) return null;
+
+        // Build the channel message.
+        const text = try allocator.dupe(u8, message.?);
+        errdefer allocator.free(text);
+        const reply_target_str = try allocator.dupe(u8, sender_raw);
+        errdefer allocator.free(reply_target_str);
+        const raw_timestamp: u64 = dm_timestamp orelse envelope_timestamp orelse root.nowEpochSecs();
+        const timestamp = normalizeEpochSeconds(raw_timestamp);
+
+        return root.ChannelMessage{
+            .id = try allocator.dupe(u8, sender_raw),
+            .sender = try allocator.dupe(u8, sender_raw),
+            .content = text,
+            .channel = "signal",
+            .timestamp = timestamp,
+            .reply_target = reply_target_str,
+            .first_name = if (source_name) |sn| if (sn.len > 0) try allocator.dupe(u8, sn) else null else null,
+            .is_group = false,
+            .sender_uuid = if (source) |src| if (src.len > 0 and isUuid(src)) try allocator.dupe(u8, src) else null else null,
+            .group_id = null,
+        };
+    }
+
     fn parseEnvelopeValue(self: *const SignalChannel, allocator: std.mem.Allocator, value: std.json.Value) !?root.ChannelMessage {
         if (value != .object) return null;
         const envelope = value.object.get("envelope") orelse return null;
         if (envelope != .object) return null;
         const env_obj = envelope.object;
 
-        // Skip outbound/sync envelopes to avoid handling our own sent messages.
-        if (env_obj.get("syncMessage") != null) return null;
+        // Handle syncMessage envelopes: only process "Note to Self" messages
+        // where the user sends a message to their own account. All other sync
+        // messages (outbound echoes to other recipients) are dropped.
+        if (env_obj.get("syncMessage")) |sync| {
+            return self.parseSyncNoteToSelf(allocator, env_obj, sync);
+        }
 
         const source = jsonString(env_obj.get("source"));
         const source_uuid = jsonString(env_obj.get("sourceUuid"));
@@ -3350,4 +3424,131 @@ test "stripTrailingSlashes empty string" {
 
 test "stripTrailingSlashes only slashes" {
     try std.testing.expectEqualStrings("", stripTrailingSlashes("///"));
+}
+
+test "parseSSEEnvelope processes Note to Self sync message" {
+    const users = [_][]const u8{"+1234567890"};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &.{},
+        true,
+        true,
+    );
+    const raw_json =
+        \\{
+        \\  "envelope": {
+        \\    "source": "+1234567890",
+        \\    "sourceNumber": "+1234567890",
+        \\    "sourceName": "Test User",
+        \\    "timestamp": 1700000000000,
+        \\    "syncMessage": {
+        \\      "sentMessage": {
+        \\        "destination": "+1234567890",
+        \\        "destinationNumber": "+1234567890",
+        \\        "message": "hello from note to self",
+        \\        "timestamp": 1700000001000
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    const msg_opt = try ch.parseSSEEnvelope(std.testing.allocator, raw_json);
+    try std.testing.expect(msg_opt != null);
+    const msg = msg_opt.?;
+    defer msg.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings("hello from note to self", msg.content);
+    try std.testing.expectEqualStrings("+1234567890", msg.sender);
+    try std.testing.expectEqualStrings("Test User", msg.first_name.?);
+    try std.testing.expectEqual(@as(u64, 1_700_000_001), msg.timestamp);
+}
+
+test "parseSSEEnvelope ignores sync outbound to other recipient" {
+    const users = [_][]const u8{"*"};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &.{},
+        true,
+        true,
+    );
+    const raw_json =
+        \\{
+        \\  "envelope": {
+        \\    "sourceNumber": "+1234567890",
+        \\    "timestamp": 1700000000000,
+        \\    "syncMessage": {
+        \\      "sentMessage": {
+        \\        "destination": "+9999999999",
+        \\        "destinationNumber": "+9999999999",
+        \\        "message": "outbound echo should be dropped",
+        \\        "timestamp": 1700000001000
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    const msg_opt = try ch.parseSSEEnvelope(std.testing.allocator, raw_json);
+    try std.testing.expect(msg_opt == null);
+}
+
+test "parseSSEEnvelope ignores Note to Self from non-allowed sender" {
+    const users = [_][]const u8{"+9999999999"};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &.{},
+        true,
+        true,
+    );
+    const raw_json =
+        \\{
+        \\  "envelope": {
+        \\    "sourceNumber": "+1234567890",
+        \\    "timestamp": 1700000000000,
+        \\    "syncMessage": {
+        \\      "sentMessage": {
+        \\        "destinationNumber": "+1234567890",
+        \\        "message": "note to self but not allowed",
+        \\        "timestamp": 1700000001000
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    const msg_opt = try ch.parseSSEEnvelope(std.testing.allocator, raw_json);
+    try std.testing.expect(msg_opt == null);
+}
+
+test "parseSSEEnvelope ignores sync with empty sentMessage" {
+    const users = [_][]const u8{"*"};
+    const ch = SignalChannel.init(
+        std.testing.allocator,
+        "http://127.0.0.1:8686",
+        "+1234567890",
+        &users,
+        &.{},
+        true,
+        true,
+    );
+    const raw_json =
+        \\{
+        \\  "envelope": {
+        \\    "sourceNumber": "+1234567890",
+        \\    "syncMessage": {
+        \\      "sentMessage": {
+        \\        "destinationNumber": "+1234567890"
+        \\      }
+        \\    }
+        \\  }
+        \\}
+    ;
+    const msg_opt = try ch.parseSSEEnvelope(std.testing.allocator, raw_json);
+    try std.testing.expect(msg_opt == null);
 }
