@@ -72,11 +72,11 @@ spec:
               value: /nullclaw-data/workspace
             - name: NULLCLAW_HOME
               value: /nullclaw-data/.nullclaw
-            - name: NULLCLAW_OPENROUTER_API_KEY
+            - name: OPENROUTER_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: nullclaw-secrets
-                  key: NULLCLAW_OPENROUTER_API_KEY
+                  key: OPENROUTER_API_KEY
             - name: SIGNAL_ACCOUNT
               valueFrom:
                 secretKeyRef:

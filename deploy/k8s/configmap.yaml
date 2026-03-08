@@ -8,18 +8,10 @@ data:
     {
       "default_temperature": 0.7,
 
-      "models": {
-        "providers": {
-          "openrouter": {
-            "api_key_env": "NULLCLAW_OPENROUTER_API_KEY"
-          }
-        }
-      },
-
       "agents": {
         "defaults": {
           "model": {
-            "primary": "openrouter/anthropic/claude-sonnet-4"
+            "primary": "openrouter/inception/mercury-2"
           }
         }
       },
