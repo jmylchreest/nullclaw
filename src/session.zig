@@ -46,6 +46,13 @@ fn estimateRestoredSessionTokens(entries: []const memory_mod.MessageEntry) u64 {
     return total;
 }
 
+fn persistedAssistantReply(agent: *const Agent, response: []const u8) []const u8 {
+    if (agent.history.items.len == 0) return response;
+    const last = agent.history.items[agent.history.items.len - 1];
+    if (last.role != .assistant) return response;
+    return last.content;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Session
 // ═══════════════════════════════════════════════════════════════════════════
@@ -447,18 +454,14 @@ pub const SessionManager = struct {
                 store.clearAutoSaved(session_key) catch {};
             } else if (!std.mem.startsWith(u8, trimmed, "/")) {
                 // Persist user + assistant history (skip slash commands).
-                // Use the assistant history entry rather than the final rendered
-                // reply so restored sessions match live history without
-                // /usage footers, reasoning blocks, or compaction banners.
-                const persisted_assistant = blk: {
-                    var idx = session.agent.history.items.len;
-                    while (idx > 0) {
-                        idx -= 1;
-                        const msg = session.agent.history.items[idx];
-                        if (msg.role == .assistant) break :blk msg.content;
-                    }
-                    break :blk response;
-                };
+                // When the turn ends with an assistant history message, prefer
+                // that canonical text over the rendered reply so restored
+                // sessions do not replay /usage footers or reasoning blocks.
+                // Some degraded turns return a fallback response without
+                // appending a final assistant history entry; in that case we
+                // must persist the actual response instead of stale tool-step
+                // assistant text from earlier in the turn.
+                const persisted_assistant = persistedAssistantReply(&session.agent, response);
                 store.saveMessage(session_key, "user", content) catch {};
                 store.saveMessage(session_key, "assistant", persisted_assistant) catch {};
             }
@@ -721,6 +724,86 @@ const DeltaCollector = struct {
     fn deinit(self: *DeltaCollector) void {
         self.data.deinit(self.allocator);
     }
+};
+
+const ProbeTool = struct {
+    pub const tool_name = "probe";
+    pub const tool_description = "Test probe tool";
+    pub const tool_params = "{}";
+    const vtable = tools_mod.ToolVTable(@This());
+
+    fn tool(self: *@This()) Tool {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    pub fn execute(_: *@This(), allocator: Allocator, _: tools_mod.JsonObjectMap) !tools_mod.ToolResult {
+        return .{ .success = true, .output = try allocator.dupe(u8, "probe ok") };
+    }
+};
+
+const SummaryFailureProvider = struct {
+    call_count: usize = 0,
+
+    const vtable = Provider.VTable{
+        .chatWithSystem = chatWithSystem,
+        .chat = chat,
+        .supportsNativeTools = supportsNativeTools,
+        .getName = getName,
+        .deinit = deinitFn,
+    };
+
+    fn provider(self: *SummaryFailureProvider) Provider {
+        return .{ .ptr = @ptrCast(self), .vtable = &vtable };
+    }
+
+    fn chatWithSystem(
+        _: *anyopaque,
+        allocator: Allocator,
+        _: ?[]const u8,
+        _: []const u8,
+        _: []const u8,
+        _: f64,
+    ) anyerror![]const u8 {
+        return allocator.dupe(u8, "");
+    }
+
+    fn chat(
+        ptr: *anyopaque,
+        allocator: Allocator,
+        _: providers.ChatRequest,
+        _: []const u8,
+        _: f64,
+    ) anyerror!providers.ChatResponse {
+        const self: *SummaryFailureProvider = @ptrCast(@alignCast(ptr));
+        self.call_count += 1;
+
+        if (self.call_count == 1) {
+            const tool_calls = try allocator.alloc(providers.ToolCall, 1);
+            tool_calls[0] = .{
+                .id = try allocator.dupe(u8, "call-probe"),
+                .name = try allocator.dupe(u8, "probe"),
+                .arguments = try allocator.dupe(u8, "{}"),
+            };
+            return .{
+                .content = try allocator.dupe(u8, "running"),
+                .tool_calls = tool_calls,
+                .usage = .{},
+                .model = try allocator.dupe(u8, "test-model"),
+            };
+        }
+
+        return error.ProviderError;
+    }
+
+    fn supportsNativeTools(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn getName(_: *anyopaque) []const u8 {
+        return "summary_failure";
+    }
+
+    fn deinitFn(_: *anyopaque) void {}
 };
 
 /// Create a test SessionManager with mock provider.
@@ -1337,6 +1420,58 @@ test "restored session token reconstruction ignores usage footer decorations" {
     try testing.expectEqualStrings("assistant reply", entries[1].content);
 
     const expected_tokens = agent_mod.estimate_text_tokens("assistant reply");
+    session.last_active = 0;
+    try testing.expectEqual(@as(usize, 1), sm.evictIdle(1));
+
+    const restored_session = try sm.getOrCreate(session_key);
+    try testing.expectEqual(@as(u64, expected_tokens), restored_session.agent.total_tokens);
+}
+
+test "persisted session falls back to rendered response when degraded turn has no final assistant history entry" {
+    var provider = SummaryFailureProvider{};
+    var probe_tool = ProbeTool{};
+    const tools = [_]Tool{probe_tool.tool()};
+    const cfg = testConfig();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(testing.allocator, ":memory:");
+    defer sqlite_mem.deinit();
+
+    var noop = observability.NoopObserver{};
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        provider.provider(),
+        &tools,
+        sqlite_mem.memory(),
+        noop.observer(),
+        sqlite_mem.sessionStore(),
+        null,
+    );
+    defer sm.deinit();
+
+    const session_key = "telegram:main:chat-fallback";
+    const session = try sm.getOrCreate(session_key);
+    session.agent.max_tool_iterations = 1;
+
+    const response = try sm.processMessage(session_key, "hello", .{
+        .channel = "telegram",
+        .is_group = false,
+        .group_id = null,
+    });
+    defer testing.allocator.free(response);
+
+    try testing.expect(std.mem.indexOf(u8, response, "Could not produce a summary") != null);
+    try testing.expect(session.agent.history.items.len > 0);
+    try testing.expect(session.agent.history.items[session.agent.history.items.len - 1].role != .assistant);
+
+    const entries = try sqlite_mem.loadMessages(testing.allocator, session_key);
+    defer memory_mod.freeMessages(testing.allocator, entries);
+    try testing.expectEqual(@as(usize, 2), entries.len);
+    try testing.expectEqualStrings("assistant", entries[1].role);
+    try testing.expectEqualStrings(response, entries[1].content);
+    try testing.expect(!std.mem.eql(u8, entries[1].content, "running"));
+
+    const expected_tokens = agent_mod.estimate_text_tokens(response);
     session.last_active = 0;
     try testing.expectEqual(@as(usize, 1), sm.evictIdle(1));
 
