@@ -461,10 +461,11 @@ pub const TelegramChannel = struct {
     const TYPING_SLEEP_STEP_NS: u64 = 100 * std.time.ns_per_ms;
 
     const OutgoingTextChunk = struct {
-        body: []u8,
+        body: []const u8,
+        owned: ?[]u8 = null,
 
         fn deinit(self: *const OutgoingTextChunk, allocator: std.mem.Allocator) void {
-            allocator.free(self.body);
+            if (self.owned) |buf| allocator.free(buf);
         }
     };
 
@@ -1187,11 +1188,19 @@ pub const TelegramChannel = struct {
 
         for (raw_chunks.items, 0..) |chunk, i| {
             const is_last = i == raw_chunks.items.len - 1;
-            var body: std.ArrayListUnmanaged(u8) = .empty;
-            errdefer body.deinit(allocator);
-            try body.appendSlice(allocator, chunk);
-            if (!is_last) try body.appendSlice(allocator, CONTINUATION_MARKER);
-            out[i] = .{ .body = try body.toOwnedSlice(allocator) };
+            if (is_last) {
+                out[i] = .{ .body = chunk };
+            } else {
+                var body: std.ArrayListUnmanaged(u8) = .empty;
+                errdefer body.deinit(allocator);
+                try body.appendSlice(allocator, chunk);
+                try body.appendSlice(allocator, CONTINUATION_MARKER);
+                const owned = try body.toOwnedSlice(allocator);
+                out[i] = .{
+                    .body = owned,
+                    .owned = owned,
+                };
+            }
             built += 1;
         }
 
@@ -3100,9 +3109,26 @@ test "telegram buildOutgoingTextChunks appends continuation only to non-last chu
     for (chunks[0 .. chunks.len - 1]) |chunk| {
         try std.testing.expect(std.mem.endsWith(u8, chunk.body, TelegramChannel.CONTINUATION_MARKER));
         try std.testing.expect(chunk.body.len <= TelegramChannel.MAX_MESSAGE_LEN);
+        try std.testing.expect(chunk.owned != null);
     }
     try std.testing.expect(!std.mem.endsWith(u8, chunks[chunks.len - 1].body, TelegramChannel.CONTINUATION_MARKER));
     try std.testing.expect(chunks[chunks.len - 1].body.len <= TelegramChannel.MAX_MESSAGE_LEN);
+    try std.testing.expect(chunks[chunks.len - 1].owned == null);
+}
+
+test "telegram buildOutgoingTextChunks reuses source slice when split is unnecessary" {
+    const allocator = std.testing.allocator;
+    const text = "Short reply";
+
+    const chunks = try TelegramChannel.buildOutgoingTextChunks(allocator, text);
+    defer {
+        for (chunks) |chunk| chunk.deinit(allocator);
+        allocator.free(chunks);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), chunks.len);
+    try std.testing.expectEqualStrings(text, chunks[0].body);
+    try std.testing.expect(chunks[0].owned == null);
 }
 
 // ════════════════════════════════════════════════════════════════════════════
