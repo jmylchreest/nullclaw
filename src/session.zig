@@ -32,6 +32,7 @@ const log = std.log.scoped(.session);
 const MESSAGE_LOG_MAX_BYTES: usize = 4096;
 const TOKEN_USAGE_LEDGER_FILENAME = "llm_token_usage.jsonl";
 const NS_PER_SEC: i128 = std.time.ns_per_s;
+const RUNTIME_COMMAND_ROLE = "__runtime_command__";
 
 fn messageLogPreview(text: []const u8) struct { slice: []const u8, truncated: bool } {
     if (text.len <= MESSAGE_LOG_MAX_BYTES) {
@@ -54,6 +55,32 @@ fn persistedAssistantReply(agent: *const Agent, response: []const u8) []const u8
     const last = agent.history.items[agent.history.items.len - 1];
     if (last.role != .assistant) return response;
     return last.content;
+}
+
+fn restorePersistedSessionState(session: *Session, entries: []const memory_mod.MessageEntry) void {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.role, RUNTIME_COMMAND_ROLE)) {
+            const maybe_response = session.agent.handleSlashCommand(entry.content) catch null;
+            if (maybe_response) |response| session.agent.allocator.free(response);
+            continue;
+        }
+
+        const role: providers.Role = if (std.mem.eql(u8, entry.role, "assistant"))
+            .assistant
+        else if (std.mem.eql(u8, entry.role, "system"))
+            .system
+        else
+            .user;
+
+        const content = session.agent.allocator.dupe(u8, entry.content) catch continue;
+        session.agent.history.append(session.agent.allocator, .{
+            .role = role,
+            .content = content,
+        }) catch {
+            session.agent.allocator.free(content);
+            continue;
+        };
+    }
 }
 
 fn sessionAgentId(session_key: []const u8) ?[]const u8 {
@@ -247,7 +274,7 @@ pub const SessionManager = struct {
             if (maybe_entries) |entries| {
                 defer memory_mod.freeMessages(self.allocator, entries);
                 if (entries.len > 0) {
-                    session.agent.loadHistory(entries) catch {};
+                    restorePersistedSessionState(session, entries);
                 }
                 if (try store.loadUsage(session_key)) |total_tokens| {
                     session.agent.total_tokens = total_tokens;
@@ -524,6 +551,10 @@ pub const SessionManager = struct {
                 store.clearMessages(session_key) catch {};
                 // Clear stale auto-saved memories
                 store.clearAutoSaved(session_key) catch {};
+            }
+
+            if (agent_mod.commands.persistedRuntimeCommand(content)) |runtime_command| {
+                store.saveMessage(session_key, RUNTIME_COMMAND_ROLE, runtime_command) catch {};
             }
 
             if (turn_input.llm_user_message) |persisted_user| {
@@ -2012,6 +2043,75 @@ test "processMessage slash-prefixed prompt that is not a local command persists 
     try testing.expectEqual(@as(usize, 2), restored.agent.historyLen());
     try testing.expectEqualStrings(slash_prompt, restored.agent.history.items[0].content);
     try testing.expectEqualStrings("ok", restored.agent.history.items[1].content);
+}
+
+test "processMessage runtime slash commands persist across reload" {
+    var mock = MockProvider{ .response = "ok" };
+    const cfg = testConfig();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(testing.allocator, ":memory:");
+    defer sqlite_mem.deinit();
+
+    var noop = observability.NoopObserver{};
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        mock.provider(),
+        &.{},
+        sqlite_mem.memory(),
+        noop.observer(),
+        sqlite_mem.sessionStore(),
+        null,
+    );
+    defer sm.deinit();
+
+    const session_key = "telegram:main:runtime-state";
+    const think_reply = try sm.processMessage(session_key, "/think high", .{
+        .channel = "telegram",
+        .is_group = false,
+        .group_id = null,
+    });
+    defer testing.allocator.free(think_reply);
+
+    const verbose_reply = try sm.processMessage(session_key, "/verbose full", .{
+        .channel = "telegram",
+        .is_group = false,
+        .group_id = null,
+    });
+    defer testing.allocator.free(verbose_reply);
+
+    const reasoning_reply = try sm.processMessage(session_key, "/reasoning stream", .{
+        .channel = "telegram",
+        .is_group = false,
+        .group_id = null,
+    });
+    defer testing.allocator.free(reasoning_reply);
+
+    const live_session = try sm.getOrCreate(session_key);
+    try testing.expectEqualStrings("high", live_session.agent.reasoning_effort.?);
+    try testing.expect(live_session.agent.verbose_level == .full);
+    try testing.expect(live_session.agent.reasoning_mode == .stream);
+    try testing.expectEqual(@as(usize, 0), live_session.agent.historyLen());
+
+    const store = sqlite_mem.sessionStore();
+    const entries = try store.loadMessages(testing.allocator, session_key);
+    defer memory_mod.freeMessages(testing.allocator, entries);
+    try testing.expectEqual(@as(usize, 3), entries.len);
+    try testing.expectEqualStrings(RUNTIME_COMMAND_ROLE, entries[0].role);
+    try testing.expectEqualStrings("/think high", entries[0].content);
+    try testing.expectEqualStrings(RUNTIME_COMMAND_ROLE, entries[1].role);
+    try testing.expectEqualStrings("/verbose full", entries[1].content);
+    try testing.expectEqualStrings(RUNTIME_COMMAND_ROLE, entries[2].role);
+    try testing.expectEqualStrings("/reasoning stream", entries[2].content);
+
+    live_session.last_active = 0;
+    try testing.expectEqual(@as(usize, 1), sm.evictIdle(1));
+
+    const restored = try sm.getOrCreate(session_key);
+    try testing.expectEqualStrings("high", restored.agent.reasoning_effort.?);
+    try testing.expect(restored.agent.verbose_level == .full);
+    try testing.expect(restored.agent.reasoning_mode == .stream);
+    try testing.expectEqual(@as(usize, 0), restored.agent.historyLen());
 }
 
 test "processMessage different keys — independent sessions" {

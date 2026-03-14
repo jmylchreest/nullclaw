@@ -156,6 +156,18 @@ pub fn planTurnInput(message: []const u8) TurnInputPlan {
     return .{ .llm_user_message = message };
 }
 
+pub fn persistedRuntimeCommand(message: []const u8) ?[]const u8 {
+    const cmd = parseSlashCommand(message) orelse return null;
+    return switch (classifySlashCommand(cmd)) {
+        .think, .verbose, .reasoning => blk: {
+            const arg = firstToken(cmd.arg);
+            if (arg.len == 0 or std.ascii.eqlIgnoreCase(arg, "status")) break :blk null;
+            break :blk message;
+        },
+        else => null,
+    };
+}
+
 fn firstToken(arg: []const u8) []const u8 {
     var it = std.mem.tokenizeAny(u8, arg, " \t");
     return it.next() orelse "";
