@@ -2520,8 +2520,15 @@ pub const Agent = struct {
                     self.noteInterruptedTool(trimmed_call_name) catch {};
                 }
                 if (verbose_mod.isVerbose()) {
-                    const output_preview = if (result.output.len > 256) result.output[0..256] else result.output;
-                    log.info("tool result: name={s} success={} output_len={d} output={s}...", .{ call.name, result.success, result.output.len, output_preview });
+                    if (result.success) {
+                        const output_preview = if (result.output.len > 256) result.output[0..256] else result.output;
+                        log.info("tool result: name={s} success={} output_len={d} output={s}...", .{ call.name, result.success, result.output.len, output_preview });
+                    } else {
+                        const error_msg = result.error_msg orelse result.output;
+                        const error_preview = if (error_msg.len > 256) error_msg[0..256] else error_msg;
+                        log.info("tool result: name={s} success={} error={s}", .{ call.name, result.success, error_preview});
+                    }
+                    
                 }
                 return .{
                     .name = call.name,
@@ -7384,6 +7391,17 @@ test "Agent selectDisplayText hides malformed tool markup payload" {
     const raw = "<tool_call>web_search<arg_key>query</arg_key><arg_value>x</arg_value></tool_call>";
     const selected = Agent.selectDisplayText(raw, "", 0);
     try std.testing.expectEqualStrings("", selected);
+}
+
+test "Agent selectDisplayText hides orphan closing tool_call tag" {
+    // Model emits </tool_call> without an opener — must not leak to user.
+    const raw = "Here are the results:\n</tool_call>\nSome reply";
+    const selected = Agent.selectDisplayText(raw, "", 0);
+    try std.testing.expectEqualStrings("", selected);
+
+    const bracket_raw = "Here are the results:\n[/tool_call]\nSome reply";
+    const bracket_selected = Agent.selectDisplayText(bracket_raw, "", 0);
+    try std.testing.expectEqualStrings("", bracket_selected);
 }
 
 test "Agent selectDisplayText keeps plain text when no markup exists" {
