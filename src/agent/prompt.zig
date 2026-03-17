@@ -111,6 +111,7 @@ fn openWorkspaceFileWithGuards(
 /// Carries per-message sender metadata so the LLM always knows who is talking.
 pub const ConversationContext = struct {
     channel: ?[]const u8 = null,
+    account_id: ?[]const u8 = null,
     // Signal
     sender_number: ?[]const u8 = null,
     sender_uuid: ?[]const u8 = null,
@@ -120,6 +121,7 @@ pub const ConversationContext = struct {
     sender_username: ?[]const u8 = null,
     sender_display_name: ?[]const u8 = null,
     // Shared
+    peer_id: ?[]const u8 = null,
     group_id: ?[]const u8 = null,
     is_group: ?bool = null,
 
@@ -129,7 +131,7 @@ pub const ConversationContext = struct {
     pub fn senderFingerprint(self: ConversationContext) u64 {
         var h = std.hash.Wyhash.init(0x1234_5678);
         // Hash each sender-identifying field (or a sentinel null byte).
-        inline for (.{ self.sender_id, self.sender_uuid, self.sender_number, self.sender_name, self.sender_username, self.sender_display_name }) |field| {
+        inline for (.{ self.sender_id, self.sender_uuid, self.sender_number, self.sender_name, self.sender_username, self.sender_display_name, self.peer_id }) |field| {
             if (field) |v| {
                 h.update(v);
             } else {

@@ -2843,8 +2843,10 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
             const conversation_context: ?yc.agent.ConversationContext = if (std.mem.eql(u8, msg.channel, "signal")) blk: {
                 break :blk .{
                     .channel = "signal",
+                    .account_id = sg.account_id,
                     .sender_number = if (msg.sender.len > 0 and msg.sender[0] == '+') msg.sender else null,
                     .sender_uuid = msg.sender_uuid,
+                    .peer_id = if (msg.is_group) msg.group_id else msg.sender,
                     .group_id = msg.group_id,
                     .is_group = msg.is_group,
                 };

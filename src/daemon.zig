@@ -593,9 +593,11 @@ fn buildInboundConversationContext(
 
     return .{
         .channel = if (has_channel) msg.channel else null,
+        .account_id = meta.account_id,
         .sender_id = if (has_sender_identity or has_scope) msg.sender_id else null,
         .sender_username = meta.sender_username,
         .sender_display_name = meta.sender_display_name,
+        .peer_id = meta.peer_id orelse if (has_scope) msg.chat_id else null,
         .group_id = group_id,
         .is_group = inferred_is_group,
     };
@@ -2050,6 +2052,7 @@ test "buildInboundConversationContext preserves discord identity metadata" {
         .session_key = "discord:778899",
     };
     const context = buildInboundConversationContext(&msg, .{
+        .account_id = "discord-main",
         .guild_id = "guild-1",
         .is_dm = false,
         .sender_username = "discord-user",
@@ -2057,7 +2060,9 @@ test "buildInboundConversationContext preserves discord identity metadata" {
     }) orelse return error.TestUnexpectedResult;
 
     try std.testing.expectEqualStrings("discord", context.channel.?);
+    try std.testing.expectEqualStrings("discord-main", context.account_id.?);
     try std.testing.expectEqualStrings("user-42", context.sender_id.?);
+    try std.testing.expectEqualStrings("778899", context.peer_id.?);
     try std.testing.expectEqualStrings("discord-user", context.sender_username.?);
     try std.testing.expectEqualStrings("Discord User", context.sender_display_name.?);
     try std.testing.expectEqualStrings("guild-1", context.group_id.?);
@@ -2096,6 +2101,7 @@ test "buildInboundConversationContext uses standardized peer metadata for extern
 
     try std.testing.expectEqualStrings("external", context.channel.?);
     try std.testing.expectEqualStrings("user-42", context.sender_id.?);
+    try std.testing.expectEqualStrings("120363-room", context.peer_id.?);
     try std.testing.expectEqualStrings("120363-room", context.group_id.?);
     try std.testing.expect(context.is_group.?);
 }

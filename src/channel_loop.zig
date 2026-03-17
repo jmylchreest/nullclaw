@@ -751,6 +751,8 @@ fn processTelegramMessage(
     // Build conversation context for Telegram
     const conversation_context: ?ConversationContext = .{
         .channel = "telegram",
+        .account_id = tg_ptr.account_id,
+        .peer_id = sender,
         .is_group = is_group,
         .group_id = if (is_group) sender else null,
     };
@@ -1580,8 +1582,10 @@ pub fn runSignalLoop(
             // Build conversation context for Signal
             const conversation_context: ?ConversationContext = .{
                 .channel = "signal",
+                .account_id = sg_ptr.account_id,
                 .sender_number = if (msg.sender.len > 0 and msg.sender[0] == '+') msg.sender else null,
                 .sender_uuid = msg.sender_uuid,
+                .peer_id = if (msg.is_group) msg.group_id else msg.sender,
                 .group_id = msg.group_id,
                 .is_group = msg.is_group,
             };
@@ -1947,6 +1951,8 @@ pub fn runMaxLoop(
 
             const conversation_context: ?ConversationContext = .{
                 .channel = "max",
+                .account_id = mx_ptr.account_id,
+                .peer_id = if (msg.is_group) reply_target else msg.sender,
                 .is_group = msg.is_group,
                 .group_id = if (msg.is_group) reply_target else null,
             };
