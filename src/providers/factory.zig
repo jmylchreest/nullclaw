@@ -689,6 +689,15 @@ test "fromConfig applies native_tools override for ollama" {
     try std.testing.expect(!h.provider().supportsNativeTools());
 }
 
+test "fromConfig passes api_key through to ollama" {
+    const alloc = std.testing.allocator;
+    var h = ProviderHolder.fromConfig(alloc, "ollama", "ollama-key", "https://api.ollama.example", true, null);
+    defer h.deinit();
+    try std.testing.expect(h == .ollama);
+    try std.testing.expectEqualStrings("ollama-key", h.ollama.api_key.?);
+    try std.testing.expectEqualStrings("https://api.ollama.example", h.ollama.base_url);
+}
+
 test "fromConfig applies max_tokens_non_streaming from table" {
     const alloc = std.testing.allocator;
     var h = ProviderHolder.fromConfig(alloc, "fireworks", "key", null, true, null);

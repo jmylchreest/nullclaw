@@ -206,9 +206,9 @@ pub const OllamaProvider = struct {
 
     /// Build the Authorization header slice for HTTP requests.
     /// Returns an empty slice when no api_key is configured (local Ollama).
-    fn buildAuthHeaders(self: OllamaProvider, headers_buf: *[1][]const u8, auth_hdr_buf: *[512]u8) []const []const u8 {
+    fn buildAuthHeaders(self: OllamaProvider, headers_buf: *[1][]const u8, auth_hdr_buf: *[512]u8) ![]const []const u8 {
         const key = self.api_key orelse return &.{};
-        const auth_hdr = std.fmt.bufPrint(auth_hdr_buf, "Authorization: Bearer {s}", .{key}) catch return &.{};
+        const auth_hdr = try std.fmt.bufPrint(auth_hdr_buf, "Authorization: Bearer {s}", .{key});
         headers_buf[0] = auth_hdr;
         return headers_buf[0..1];
     }
@@ -303,7 +303,7 @@ pub const OllamaProvider = struct {
 
         var headers_buf: [1][]const u8 = undefined;
         var auth_hdr_buf: [512]u8 = undefined;
-        const headers = self.buildAuthHeaders(&headers_buf, &auth_hdr_buf);
+        const headers = self.buildAuthHeaders(&headers_buf, &auth_hdr_buf) catch return error.OllamaApiError;
 
         const resp_body = root.curlPostTimed(allocator, url, body, headers, 0) catch return error.OllamaApiError;
         defer allocator.free(resp_body);
@@ -328,7 +328,7 @@ pub const OllamaProvider = struct {
 
         var headers_buf: [1][]const u8 = undefined;
         var auth_hdr_buf: [512]u8 = undefined;
-        const headers = self.buildAuthHeaders(&headers_buf, &auth_hdr_buf);
+        const headers = self.buildAuthHeaders(&headers_buf, &auth_hdr_buf) catch return error.OllamaApiError;
 
         const resp_body = root.curlPostTimed(allocator, url, body, headers, request.timeout_secs) catch return error.OllamaApiError;
         defer allocator.free(resp_body);
@@ -493,7 +493,7 @@ test "buildAuthHeaders with api_key returns authorization header" {
     const p = OllamaProvider.init(std.testing.allocator, null, "test-key");
     var headers_buf: [1][]const u8 = undefined;
     var auth_hdr_buf: [512]u8 = undefined;
-    const headers = p.buildAuthHeaders(&headers_buf, &auth_hdr_buf);
+    const headers = try p.buildAuthHeaders(&headers_buf, &auth_hdr_buf);
     try std.testing.expectEqual(@as(usize, 1), headers.len);
     try std.testing.expectEqualStrings("Authorization: Bearer test-key", headers[0]);
 }
@@ -502,8 +502,17 @@ test "buildAuthHeaders without api_key returns empty" {
     const p = OllamaProvider.init(std.testing.allocator, null, null);
     var headers_buf: [1][]const u8 = undefined;
     var auth_hdr_buf: [512]u8 = undefined;
-    const headers = p.buildAuthHeaders(&headers_buf, &auth_hdr_buf);
+    const headers = try p.buildAuthHeaders(&headers_buf, &auth_hdr_buf);
     try std.testing.expectEqual(@as(usize, 0), headers.len);
+}
+
+test "buildAuthHeaders errors when api_key exceeds header buffer" {
+    // Regression: a too-long cloud key must fail closed instead of dropping auth.
+    const long_key = [_]u8{'a'} ** 600;
+    const p = OllamaProvider.init(std.testing.allocator, null, long_key[0..]);
+    var headers_buf: [1][]const u8 = undefined;
+    var auth_hdr_buf: [512]u8 = undefined;
+    try std.testing.expectError(error.NoSpaceLeft, p.buildAuthHeaders(&headers_buf, &auth_hdr_buf));
 }
 
 // ─── Tool Call Tests ─────────────────────────────────────────────────────────
